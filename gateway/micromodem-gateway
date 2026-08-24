@@ -1,0 +1,228 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+env_file="$script_dir/.env"
+compose_file="$script_dir/compose.yml"
+table_id=109
+rule_priority=10900
+resolver_rule_priority=10899
+tun_if=mm-tun0
+runtime_dir="$script_dir/runtime"
+forwarding_state="$runtime_dir/ip_forward.before"
+managed_state="$runtime_dir/downstream-managed.before"
+mtu_state="$runtime_dir/downstream-mtu.before"
+
+die() { echo "micromodem-gateway: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+
+remove_nixos_dhcp_rule() {
+  nft -a list chain inet nixos-fw input-allow 2>/dev/null |
+    awk '/comment "micromodem-dhcp"/ { print $NF }' |
+    while IFS= read -r handle; do
+      case "$handle" in
+        ''|*[!0-9]*) ;;
+        *) nft delete rule inet nixos-fw input-allow handle "$handle" 2>/dev/null || true ;;
+      esac
+    done
+}
+
+remove_nixos_dns_rule() {
+  nft -a list chain inet nixos-fw input-allow 2>/dev/null |
+    awk '/comment "micromodem-dns"/ { print $NF }' |
+    while IFS= read -r handle; do
+      case "$handle" in
+        ''|*[!0-9]*) ;;
+        *) nft delete rule inet nixos-fw input-allow handle "$handle" 2>/dev/null || true ;;
+      esac
+    done
+}
+
+remove_nixos_rpfilter_rule() {
+  nft -a list chain inet nixos-fw rpfilter-allow 2>/dev/null |
+    awk '/comment "micromodem-rpfilter"/ { print $NF }' |
+    while IFS= read -r handle; do
+      case "$handle" in
+        ''|*[!0-9]*) ;;
+        *) nft delete rule inet nixos-fw rpfilter-allow handle "$handle" 2>/dev/null || true ;;
+      esac
+    done
+}
+
+load_config() {
+  [ -f "$env_file" ] || die "copy .env.example to .env and edit it first"
+  set -a
+  # This is an administrator-owned configuration file of KEY=value entries.
+  # shellcheck disable=SC1090
+  . "$env_file"
+  set +a
+  : "${SOCKS5_ADDR:?SOCKS5_ADDR is required}"
+  : "${DOWNSTREAM_IF:?DOWNSTREAM_IF is required}"
+  : "${DOWNSTREAM_ADDR:=10.77.0.1/24}"
+  : "${DOWNSTREAM_SUBNET:=10.77.0.0/24}"
+  : "${TUN_MTU:=1400}"
+  : "${CLIENT_MTU:=$TUN_MTU}"
+  case "$DOWNSTREAM_IF" in *[!A-Za-z0-9_.:-]*) die "invalid DOWNSTREAM_IF";; esac
+  case "$SOCKS5_ADDR" in *[!0-9a-fA-F:.]*) die "SOCKS5_ADDR must be an IP address";; esac
+  case "$TUN_MTU:$CLIENT_MTU" in *[!0-9:]*) die "TUN_MTU and CLIENT_MTU must be numbers";; esac
+}
+
+compose() {
+  docker compose --env-file "$env_file" -f "$compose_file" "$@"
+}
+
+wait_for_tun() {
+  count=0
+  while ! ip link show dev "$tun_if" >/dev/null 2>&1; do
+    count=$((count + 1))
+    [ "$count" -lt 50 ] || die "$tun_if was not created; inspect: docker logs micromodem-tunnel"
+    sleep 0.2
+  done
+}
+
+start() {
+  [ "$(id -u)" -eq 0 ] || die "start must run as root"
+  need docker; need ip; need nft
+  load_config
+  [ -c /dev/net/tun ] || die "/dev/net/tun is unavailable"
+  ip link show dev "$DOWNSTREAM_IF" >/dev/null 2>&1 || die "interface not found: $DOWNSTREAM_IF"
+  upstream_if=$(ip route get "$SOCKS5_ADDR" | awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+  [ -n "$upstream_if" ] || die "no route to SOCKS5 server $SOCKS5_ADDR"
+  [ "$upstream_if" != "$DOWNSTREAM_IF" ] || die "upstream and downstream both resolve to $DOWNSTREAM_IF"
+
+  # NetworkManager and hostapd cannot both own the AP interface. Remember the
+  # state and release it before assigning the gateway address.
+  mkdir -p "$runtime_dir"
+  if [ ! -f "$mtu_state" ]; then
+    ip -o link show dev "$DOWNSTREAM_IF" | awk '{ for (i=1; i<=NF; i++) if ($i == "mtu") { print $(i+1); exit } }' > "$mtu_state"
+  fi
+  if command -v nmcli >/dev/null 2>&1; then
+    nm_managed=$(nmcli -g GENERAL.NM-MANAGED device show "$DOWNSTREAM_IF" 2>/dev/null || true)
+    printf '%s\n' "${nm_managed:-yes}" > "$managed_state"
+    nmcli device disconnect "$DOWNSTREAM_IF" >/dev/null 2>&1 || true
+    nmcli device set "$DOWNSTREAM_IF" managed no
+  fi
+  command -v rfkill >/dev/null 2>&1 && rfkill unblock wifi || true
+
+  compose up -d --build tunnel
+  wait_for_tun
+
+  ip address flush dev "$DOWNSTREAM_IF" scope global
+  ip address replace "$DOWNSTREAM_ADDR" dev "$DOWNSTREAM_IF"
+  ip link set dev "$DOWNSTREAM_IF" mtu "$CLIENT_MTU"
+  ip link set dev "$DOWNSTREAM_IF" up
+  if [ ! -f "$forwarding_state" ]; then
+    sysctl -n net.ipv4.ip_forward > "$forwarding_state"
+  fi
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+  ip rule del priority "$rule_priority" 2>/dev/null || true
+  ip rule del priority "$resolver_rule_priority" 2>/dev/null || true
+  ip route flush table "$table_id" 2>/dev/null || true
+  # `replace` creates the otherwise absent numeric FIB table and makes restart
+  # idempotent after an interrupted previous run.
+  ip route replace table "$table_id" "$DOWNSTREAM_SUBNET" dev "$DOWNSTREAM_IF" scope link
+  ip route replace table "$table_id" default dev "$tun_if"
+  ip rule add priority "$rule_priority" iif "$DOWNSTREAM_IF" lookup "$table_id"
+  # The local resolver binds its upstream TCP connections to the gateway
+  # address, keeping DNS inside the same SOCKS tunnel as client traffic.
+  ip rule add priority "$resolver_rule_priority" from "${DOWNSTREAM_ADDR%/*}/32" lookup "$table_id"
+
+  nft delete table inet micromodem 2>/dev/null || true
+  nft -f - <<EOF
+table inet micromodem {
+  chain forward {
+    type filter hook forward priority -5; policy accept;
+    iifname "$DOWNSTREAM_IF" oifname "$tun_if" tcp flags syn tcp option maxseg size set rt mtu
+    iifname "$DOWNSTREAM_IF" oifname "$tun_if" counter accept
+    iifname "$tun_if" oifname "$DOWNSTREAM_IF" counter accept
+    iifname "$DOWNSTREAM_IF" drop
+    oifname "$DOWNSTREAM_IF" drop
+  }
+  chain input {
+    type filter hook input priority -5; policy accept;
+    iifname "$DOWNSTREAM_IF" udp dport { 67, 68 } accept
+    iifname "$DOWNSTREAM_IF" ip daddr ${DOWNSTREAM_ADDR%/*} meta l4proto { tcp, udp } th dport 53 accept
+    iifname "$DOWNSTREAM_IF" ip daddr ${DOWNSTREAM_ADDR%/*} icmp type echo-request accept
+    iifname "$DOWNSTREAM_IF" drop
+  }
+}
+EOF
+  # NixOS evaluates its own input base chain after ours. An accept verdict in
+  # one base chain is not final, so explicitly permit DHCP in input-allow.
+  if nft list chain inet nixos-fw input-allow >/dev/null 2>&1; then
+    remove_nixos_dhcp_rule
+    remove_nixos_dns_rule
+    nft -f - <<EOF
+add rule inet nixos-fw input-allow iifname "$DOWNSTREAM_IF" udp dport 67 accept comment "micromodem-dhcp"
+add rule inet nixos-fw input-allow iifname "$DOWNSTREAM_IF" ip daddr ${DOWNSTREAM_ADDR%/*} meta l4proto { tcp, udp } th dport 53 accept comment "micromodem-dns"
+EOF
+  fi
+  # Replies emerge from the TUN with arbitrary Internet source addresses. The
+  # strict NixOS rpfilter would compare those against the RNDIS default route
+  # and discard them before forwarding, so trust only this dedicated TUN.
+  if nft list chain inet nixos-fw rpfilter-allow >/dev/null 2>&1; then
+    remove_nixos_rpfilter_rule
+    nft -f - <<EOF
+add rule inet nixos-fw rpfilter-allow iifname "$tun_if" accept comment "micromodem-rpfilter"
+EOF
+  fi
+  compose up -d --build downstream
+  echo "MicroModem is routing $DOWNSTREAM_IF through SOCKS5 at $SOCKS5_ADDR:${SOCKS5_PORT:-8228}."
+}
+
+stop() {
+  [ "$(id -u)" -eq 0 ] || die "stop must run as root"
+  load_config
+  compose down || true
+  nft delete table inet micromodem 2>/dev/null || true
+  remove_nixos_dhcp_rule
+  remove_nixos_dns_rule
+  remove_nixos_rpfilter_rule
+  ip rule del priority "$rule_priority" 2>/dev/null || true
+  ip rule del priority "$resolver_rule_priority" 2>/dev/null || true
+  ip route flush table "$table_id" 2>/dev/null || true
+  ip address del "$DOWNSTREAM_ADDR" dev "$DOWNSTREAM_IF" 2>/dev/null || true
+  if [ -f "$mtu_state" ]; then
+    previous_mtu=$(sed -n '1p' "$mtu_state")
+    case "$previous_mtu" in ''|*[!0-9]*) ;; *) ip link set dev "$DOWNSTREAM_IF" mtu "$previous_mtu" 2>/dev/null || true;; esac
+    rm -f "$mtu_state"
+  fi
+  if command -v nmcli >/dev/null 2>&1 && [ -f "$managed_state" ]; then
+    previous_managed=$(sed -n '1p' "$managed_state")
+    case "$previous_managed" in
+      yes) nmcli device set "$DOWNSTREAM_IF" managed yes || true ;;
+      no) nmcli device set "$DOWNSTREAM_IF" managed no || true ;;
+    esac
+    rm -f "$managed_state"
+  fi
+  if [ -f "$forwarding_state" ]; then
+    previous_forwarding=$(sed -n '1p' "$forwarding_state")
+    case "$previous_forwarding" in 0|1) sysctl -w "net.ipv4.ip_forward=$previous_forwarding" >/dev/null;; esac
+    rm -f "$forwarding_state"
+  fi
+  echo "MicroModem gateway stopped and its network policy was removed."
+}
+
+status() {
+  load_config
+  containers=$(compose ps 2>&1) || { printf '%s\n' "$containers"; return 1; }
+  if ! printf '%s\n' "$containers" | grep -q 'micromodem-tunnel'; then
+    echo "MicroModem gateway is not running."
+    return 0
+  fi
+  printf '%s\n' "$containers"
+  if ip rule show | grep "^${rule_priority}:"; then
+    ip route show table "$table_id" 2>/dev/null || true
+  else
+    echo "Policy route is not installed."
+  fi
+}
+
+case "${1:-}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) status ;;
+  *) echo "Usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

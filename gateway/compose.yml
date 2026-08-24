@@ -1,0 +1,45 @@
+services:
+  tunnel:
+    # Pinned multi-architecture index: amd64, arm64, arm/v7, arm/v6, 386, riscv64.
+    image: ghcr.io/heiher/hev-socks5-tunnel:2.17@sha256:48e2ab1caf3e35e2a49262d9cceef9aacea279448a3b6d2938e4d47cd3cf3003
+    container_name: micromodem-tunnel
+    restart: "no"
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TUN: mm-tun0
+      MTU: ${TUN_MTU:-1400}
+      CONFIG_ROUTES: "0"
+      SOCKS5_ADDR: ${SOCKS5_ADDR:?set SOCKS5_ADDR in gateway/.env}
+      SOCKS5_PORT: ${SOCKS5_PORT:-8282}
+      SOCKS5_UDP_MODE: ${SOCKS5_UDP_MODE:-udp}
+      SOCKS5_USERNAME: ${SOCKS5_USERNAME:-}
+      SOCKS5_PASSWORD: ${SOCKS5_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+  downstream:
+    build:
+      context: downstream
+    container_name: micromodem-downstream
+    restart: "no"
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      DOWNSTREAM_IF: ${DOWNSTREAM_IF:?set DOWNSTREAM_IF in gateway/.env}
+      DOWNSTREAM_MODE: ${DOWNSTREAM_MODE:-ethernet}
+      DOWNSTREAM_ADDR: ${DOWNSTREAM_ADDR:-10.77.0.1/24}
+      DOWNSTREAM_SUBNET: ${DOWNSTREAM_SUBNET:-10.77.0.0/24}
+      CLIENT_MTU: ${CLIENT_MTU:-1400}
+      DHCP_START: ${DHCP_START:-10.77.0.20}
+      DHCP_END: ${DHCP_END:-10.77.0.200}
+      DHCP_LEASE: ${DHCP_LEASE:-12h}
+      DNS_SERVERS: ${DNS_SERVERS:-1.1.1.1,9.9.9.9}
+      WIFI_SSID: ${WIFI_SSID:-MicroModem}
+      WIFI_PASSPHRASE: ${WIFI_PASSPHRASE:-}
+      WIFI_CHANNEL: ${WIFI_CHANNEL:-6}
+      WIFI_COUNTRY: ${WIFI_COUNTRY:-US}

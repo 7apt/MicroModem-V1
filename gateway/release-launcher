@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+release_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+gateway="$release_dir/gateway/micromodem-gateway"
+
+case "${1:-}" in
+  start|stop|restart)
+    if [ "$(id -u)" -eq 0 ]; then
+      exec "$gateway" "$1"
+    fi
+    exec sudo "$gateway" "$1"
+    ;;
+  status)
+    exec "$gateway" status
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}" >&2
+    exit 2
+    ;;
+esac

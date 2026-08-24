@@ -21,8 +21,15 @@ needs an explicit policy.
 ## Build and run
 
 ```bash
+nix develop path:./nix
 cargo build --release
 ./target/release/micromodem scan
+```
+
+Or build without entering a persistent development shell:
+
+```bash
+nix develop path:./nix --command cargo build --release
 ```
 
 For a known service:
@@ -55,12 +62,16 @@ carrier, VPN, or proxy policy can still restrict it.
 Start the dashboard with:
 
 ```bash
-./target/release/micromodem gui
+./run-gui
 ```
 
-This opens a native Tauri desktop window with a lavender-and-dark-grey
-dashboard and a **Scan networks** button. The web UI has no network listener:
-it invokes the Rust scanner through Tauri's command bridge.
+This opens a native, GPU-rendered Rust window with a lavender-and-dark-grey
+dashboard and a **Scan networks** button. It uses egui/eframe directly and has
+no browser engine, WebKit process, HTML, JavaScript, or local web server.
+
+Use `./run-gui` during development instead of launching a binary under
+`target/` directly. The launcher selects the newest debug/release build and
+rebuilds it whenever the Rust source is newer.
 
 ## Suggested next layer
 
@@ -69,3 +80,61 @@ consume its machine-readable `--json` output and *explicitly* choose a routing
 policy. Native RNDIS routing is preferable for full TCP/UDP; a SOCKS5 endpoint
 is useful for applications that support SOCKS and for a later TUN-to-SOCKS
 adapter.
+
+## Cellular gateway
+
+The `gateway/` directory contains the first data-plane implementation. It
+turns a detected Android SOCKS5 endpoint into a routed Ethernet handoff for a
+router WAN port, or into a Wi-Fi access point. TCP and UDP are translated by
+`hev-socks5-tunnel`; DHCP, policy routing, and firewall rules are managed
+separately. DHCP gives clients the configured public DNS addresses directly,
+so DNS follows the tunnel policy instead of the computer's default route.
+
+Requirements are Linux, Docker Compose, nftables, `iproute2`, `/dev/net/tun`,
+and root access. For Wi-Fi mode, the selected adapter and driver must support
+nl80211 AP mode.
+
+```bash
+cp gateway/.env.example gateway/.env
+# Edit SOCKS5_ADDR, SOCKS5_PORT, DOWNSTREAM_IF, and DOWNSTREAM_MODE.
+sudo gateway/micromodem-gateway start
+sudo gateway/micromodem-gateway status
+sudo gateway/micromodem-gateway stop
+```
+
+Ethernet mode is intended for connection to a router's WAN port. Wi-Fi mode
+runs `hostapd` in the downstream container. In both modes clients receive
+addresses from `10.77.0.0/24` by default. The gateway installs a policy rule
+only for packets arriving on the downstream interface, so host traffic and
+the SOCKS5 control connection cannot recurse into the tunnel.
+
+This is routed IP service, not a layer-2 bridge. Broadcast, multicast, and
+inbound port forwarding through the Android/carrier network are not implied.
+
+## Headless server and Raspberry Pi release
+
+Build the architecture-independent server archive with:
+
+```bash
+nix build path:.#release
+```
+
+The archive and SHA-256 checksum are placed under `result/`. The target Linux
+machine needs Docker Compose, iproute2, nftables, and `/dev/net/tun`, but does
+not need Rust, Nix, GTK, or the desktop GUI. See `gateway/RELEASE.md` for target
+installation and operation.
+
+## Portable Linux GUI release
+
+Build an x86_64 AppImage bundle together with the gateway assets:
+
+```bash
+./build-gui-release
+```
+
+The GUI release is built inside a Debian 12 container so it does not retain
+Nix store paths and targets glibc 2.36 rather than the build host's libc.
+
+Extract the archive from `dist/`, copy `gateway/.env.example` to
+`gateway/.env`, and launch `./micromodem-gui`. The launcher keeps the writable
+gateway configuration outside the AppImage and points the GUI at it.

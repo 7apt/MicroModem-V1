@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$project_dir/Cargo.toml" | sed -n '1p')
+dist_dir="$project_dir/dist"
+stage_dir="$dist_dir/micromodem-gui-${version}-linux-x86_64"
+if [ "${MICROMODEM_REUSE_APPIMAGE:-0}" != 1 ]; then
+  docker build -t micromodem-gui-builder:bookworm "$project_dir/packaging/gui"
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp/micromodem-builder \
+    -e CARGO_HOME=/tmp/micromodem-builder/cargo \
+    -e CARGO_TARGET_DIR=/work/target-portable \
+    -e HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
+    -e HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
+    -v "$project_dir:/work" \
+    -w /work \
+    micromodem-gui-builder:bookworm \
+    sh -c 'cargo build --release && rm -rf /tmp/MicroModem.AppDir && mkdir -p /tmp/MicroModem.AppDir/usr/bin && cp /work/target-portable/release/micromodem /tmp/MicroModem.AppDir/usr/bin/micromodem && cp /work/icons/icon.png /tmp/MicroModem.AppDir/micromodem.png && printf "[Desktop Entry]\nType=Application\nName=MicroModem\nExec=micromodem gui\nIcon=micromodem\nCategories=Network;Utility;\nTerminal=false\n" >/tmp/MicroModem.AppDir/micromodem.desktop && printf "#!/bin/sh\nexec \"\$APPDIR/usr/bin/micromodem\" gui \"\$@\"\n" >/tmp/MicroModem.AppDir/AppRun && chmod 0755 /tmp/MicroModem.AppDir/AppRun && ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 appimagetool /tmp/MicroModem.AppDir /work/target-portable/release/MicroModem.AppImage'
+fi
+
+appimage="$project_dir/target-portable/release/MicroModem.AppImage"
+[ -f "$appimage" ] || { echo "AppImage build did not produce MicroModem.AppImage" >&2; exit 1; }
+
+rm -rf "$stage_dir"
+mkdir -p "$stage_dir/gateway/downstream"
+cp "$appimage" "$stage_dir/MicroModem.AppImage"
+cp "$project_dir/gateway/gui-release-launcher" "$stage_dir/micromodem-gui"
+cp "$project_dir/gateway/compose.yml" "$stage_dir/gateway/compose.yml"
+cp "$project_dir/gateway/.env.example" "$stage_dir/gateway/.env.example"
+cp "$project_dir/gateway/micromodem-gateway" "$stage_dir/gateway/micromodem-gateway"
+cp "$project_dir/gateway/downstream/Dockerfile" "$stage_dir/gateway/downstream/Dockerfile"
+cp "$project_dir/gateway/downstream/entrypoint.sh" "$stage_dir/gateway/downstream/entrypoint.sh"
+cp "$project_dir/gateway/RELEASE.md" "$stage_dir/README.md"
+chmod 0755 "$stage_dir/MicroModem.AppImage" "$stage_dir/micromodem-gui" \
+  "$stage_dir/gateway/micromodem-gateway" "$stage_dir/gateway/downstream/entrypoint.sh"
+
+tar -C "$dist_dir" -czf "$dist_dir/micromodem-gui-${version}-linux-x86_64.tar.gz" \
+  "micromodem-gui-${version}-linux-x86_64"
+sha256sum "$dist_dir/micromodem-gui-${version}-linux-x86_64.tar.gz" \
+  > "$dist_dir/micromodem-gui-${version}-linux-x86_64.tar.gz.sha256"
+echo "$dist_dir/micromodem-gui-${version}-linux-x86_64.tar.gz"

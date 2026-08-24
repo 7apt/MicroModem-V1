@@ -6,8 +6,10 @@ use std::{
     process::Command,
     time::Duration,
 };
+mod gateway;
+mod gui;
 
-const DEFAULT_PORTS: &[u16] = &[8282, 1080, 10808, 9050, 7890, 3128, 8080];
+const DEFAULT_PORTS: &[u16] = &[8228, 8282, 1080, 10808, 9050, 7890, 3128, 8080];
 const KNOWN_HOSTS: &[Ipv4Addr] = &[
     Ipv4Addr::new(192, 168, 49, 1),
     Ipv4Addr::new(192, 168, 42, 129),
@@ -218,9 +220,17 @@ fn route_gateway(name: &str) -> Option<Ipv4Addr> {
 
 fn interface_score(name: &str) -> u8 {
     let n = name.to_ascii_lowercase();
-    if n.contains("rndis") {
+    let device = format!("/sys/class/net/{name}/device");
+    let driver = std::fs::read_link(format!("{device}/driver"))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let is_usb = std::fs::canonicalize(&device)
+        .ok()
+        .is_some_and(|path| path.to_string_lossy().contains("/usb"));
+    if n.contains("rndis") || driver == "rndis_host" {
         100
-    } else if n.starts_with("usb") {
+    } else if n.starts_with("usb") || is_usb {
         95
     } else if n.starts_with("enx") {
         80
@@ -472,21 +482,9 @@ fn to_json(interfaces: &[Interface], findings: &[Finding]) -> String {
 }
 
 fn run_gui() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![scan_networks])
-        .run(tauri::generate_context!())
-        .expect("error while running MicroModem");
+    gui::run();
 }
 
-#[tauri::command]
-async fn scan_networks() -> String {
-    tauri::async_runtime::spawn_blocking(|| {
-        let (interfaces, findings) = run_scan(None, None, Duration::from_millis(700), false);
-        to_json(&interfaces, &findings)
-    })
-    .await
-    .unwrap_or_else(|error| format!("{{\"error\":\"scan worker failed: {error}\"}}"))
-}
 
 #[cfg(test)]
 mod tests {

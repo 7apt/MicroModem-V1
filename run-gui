@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export CARGO_HOME="$project_dir/.cargo-release"
+
+if [ "${MICROMODEM_DEV_SHELL:-0}" != 1 ]; then
+  exec nix --extra-experimental-features 'nix-command flakes' develop "path:$project_dir/nix" --command "$0" "$@"
+fi
+
+debug_bin="$project_dir/target/debug/micromodem"
+release_bin="$project_dir/target/release/micromodem"
+
+newest_source=$(find "$project_dir/src" "$project_dir/Cargo.toml" \
+  -type f -printf '%T@ %p\n' | sort -nr | sed -n '1s/^[^ ]* //p')
+
+binary=
+if [ -x "$release_bin" ] && { [ ! -x "$debug_bin" ] || [ "$release_bin" -nt "$debug_bin" ]; }; then
+  binary=$release_bin
+elif [ -x "$debug_bin" ]; then
+  binary=$debug_bin
+fi
+
+if [ -z "$binary" ]; then
+  echo "MicroModem has not been built yet." >&2
+  exit 1
+fi
+
+if [ -n "$newest_source" ] && [ "$newest_source" -nt "$binary" ]; then
+  echo "MicroModem changed; rebuilding the GUI…" >&2
+  cargo build --release
+  binary=$release_bin
+fi
+
+exec "$binary" gui

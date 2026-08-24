@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+release_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+appimage="$release_dir/MicroModem.AppImage"
+
+[ -x "$appimage" ] || {
+  echo "MicroModem.AppImage is missing or not executable" >&2
+  exit 1
+}
+
+export MICROMODEM_GATEWAY_DIR="$release_dir/gateway"
+
+if [ -e /etc/NIXOS ]; then
+  if command -v appimage-run >/dev/null 2>&1; then
+    exec appimage-run "$appimage" "$@"
+  fi
+  if command -v nix >/dev/null 2>&1; then
+    exec nix --extra-experimental-features 'nix-command flakes' shell \
+      nixpkgs#appimage-run --command appimage-run "$appimage" "$@"
+  fi
+fi
+
+exec "$appimage" "$@"

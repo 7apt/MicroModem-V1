@@ -1,0 +1,13 @@
+all of it
+
+I'm trying to make something weird
+
+so its a triple stack network thing
+
+probably the wrong words
+
+android side:
+
+TetherFuseNet + Socks5H/4A(UDP Associate is supported here)
+routes into computer over rndis or wlan
+computer turns it into normal traffic using iptables or some shit(containerized ofc), so that it can become outgoing to an ethernet interface or a wlan interface for broadcast
