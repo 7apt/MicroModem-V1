@@ -1,0 +1,16 @@
+[package]
+name = "micromodem"
+version = "0.1.0"
+edition = "2024"
+description = "Detect Android USB tethering interfaces and local proxy endpoints"
+license = "MIT"
+
+[[bin]]
+name = "micromodem"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

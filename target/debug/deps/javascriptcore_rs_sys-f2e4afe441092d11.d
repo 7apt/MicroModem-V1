@@ -1,0 +1,5 @@
+/home/taptsecd/Projects/MicroModem V1/target/debug/deps/javascriptcore_rs_sys-f2e4afe441092d11.d: /home/taptsecd/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/javascriptcore-rs-sys-1.1.1/src/lib.rs
+
+/home/taptsecd/Projects/MicroModem V1/target/debug/deps/libjavascriptcore_rs_sys-f2e4afe441092d11.rmeta: /home/taptsecd/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/javascriptcore-rs-sys-1.1.1/src/lib.rs
+
+/home/taptsecd/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/javascriptcore-rs-sys-1.1.1/src/lib.rs:
