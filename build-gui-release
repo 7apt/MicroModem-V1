@@ -6,12 +6,16 @@ version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$project_dir/Cargo.toml" | sed
 dist_dir="$project_dir/dist"
 stage_dir="$dist_dir/micromodem-gui-${version}-linux-x86_64"
 if [ "${MICROMODEM_REUSE_APPIMAGE:-0}" != 1 ]; then
-  docker build -t micromodem-gui-builder:bookworm "$project_dir/packaging/gui"
+  if [ "${MICROMODEM_REBUILD_BUILDER:-0}" = 1 ] || \
+     ! docker image inspect micromodem-gui-builder:bookworm >/dev/null 2>&1; then
+    docker build -t micromodem-gui-builder:bookworm "$project_dir/packaging/gui"
+  fi
   docker run --rm \
     --user "$(id -u):$(id -g)" \
     -e HOME=/tmp/micromodem-builder \
-    -e CARGO_HOME=/tmp/micromodem-builder/cargo \
+    -e CARGO_HOME=/work/.cargo-release \
     -e CARGO_TARGET_DIR=/work/target-portable \
+    -e CARGO_NET_OFFLINE="${CARGO_NET_OFFLINE:-false}" \
     -e HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" \
     -e HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" \
     -v "$project_dir:/work" \

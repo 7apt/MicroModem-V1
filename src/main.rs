@@ -171,6 +171,27 @@ fn option_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
 }
 
 fn discover_interfaces() -> Vec<Interface> {
+    // Address discovery alone hides disconnected Wi-Fi and Ethernet adapters,
+    // exactly when they are most useful as a downstream AP/handoff device.
+    // Seed the list from kernel links, then enrich it with any private IPv4
+    // addresses and route gateways that currently exist.
+    let mut names = BTreeSet::new();
+    let links = Command::new("ip").args(["-o", "link", "show"]).output();
+    if let Ok(output) = links {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(raw_name) = line.split_whitespace().nth(1) {
+                let name = raw_name
+                    .trim_end_matches(':')
+                    .split('@')
+                    .next()
+                    .unwrap_or_default();
+                if !name.is_empty() && interface_score(name) > 0 {
+                    names.insert(name.to_owned());
+                }
+            }
+        }
+    }
+
     let mut addresses: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
     let output = Command::new("ip")
         .args(["-o", "-4", "addr", "show", "scope", "global"])
@@ -182,24 +203,28 @@ fn discover_interfaces() -> Vec<Interface> {
                 && let Some(ip) = cidr.split('/').next().and_then(|s| s.parse().ok())
                 && is_private(ip)
             {
+                names.insert((*name).into());
                 addresses.entry((*name).into()).or_default().push(ip);
             }
         }
     }
-    addresses
+
+    let mut interfaces: Vec<_> = names
         .into_iter()
-        .map(|(name, addresses)| {
+        .map(|name| {
             let gateway = route_gateway(&name);
             let score = interface_score(&name);
             Interface {
+                addresses: addresses.remove(&name).unwrap_or_default(),
                 name,
-                addresses,
                 gateway,
                 score,
             }
         })
         .filter(|i| i.score > 0)
-        .collect()
+        .collect();
+    interfaces.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+    interfaces
 }
 
 fn route_gateway(name: &str) -> Option<Ipv4Addr> {
